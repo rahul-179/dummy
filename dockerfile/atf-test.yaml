@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: atf-test
+  labels:
+    app: atf-test
+spec:
+  containers:
+  - name: myapp-container
+    image: atf-test:latest
+    imagePullPolicy: IfNotPresent
+  restartPolicy: Never
+

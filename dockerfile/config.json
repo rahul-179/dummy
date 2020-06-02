@@ -1,0 +1,9 @@
+{
+    "ip" : "35.222.238.214",
+    "total_gpus" : 4,
+    "total_nodes" : 6,
+    "pool_type" : "TeslaM40",
+    "port" : 32222,
+    "mode" : "cpu",
+    "git_branch" : "automation_2.0"
+}
