@@ -1,0 +1,310 @@
+---
+# The getting-started Pipeline will run through several tasks:
+# - source is pulled from git
+# - conditions say go test must pass before moving on
+# - source is built into an image by img
+# - image output is pushed to ECR
+# - cloudevent emitted
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: getting-started-pipeline
+  namespace: getting-started
+spec:
+  resources:
+    - name: source-repo
+      type: git
+    - name: pr-resource
+      type: pullRequest
+    - name: image-source
+      type: image
+    - name: event-to-sink
+      type: cloudEvent
+  params:
+    - name: comment
+      type: string
+  tasks:
+    - name: build-docker-image
+      taskRef:
+        name: build-docker-image
+      Timeout: "20h0m0s"
+      params:
+        - name: pathToContext
+          value: /workspace/source-repo
+        - name: comment
+          value: $(params.comment)
+      resources:
+        inputs:
+          - name: pr-resource
+            resource: pr-resource
+          - name: source-repo
+            resource: source-repo
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: build-docker-image
+  namespace: getting-started
+spec:
+  params:
+  - name: pathToContext
+    description:
+      The build directory used by img
+    default: gpuaas/testing/dockerfile
+  - name: comment
+    type: string
+  resources:
+    inputs:
+      - name: pr-resource
+        type: pullRequest
+      - name: source-repo
+        type: git
+  steps:
+    - name: install-dkube
+      env:
+        - name: API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: webhook-secret
+              key: password
+      image: ocdr/atf-test:new
+      securityContext:
+        runAsUser: 0
+        privileged: true
+      command: 
+        - bash
+      args: 
+        - -c
+        - |
+           echo "DEBUG: inside task"
+
+           my_url=$(resources.inputs.pr-resource.url)
+           echo $my_url
+           new_url=$(echo $my_url | sed -e "s/github.com/api.github.com\/repos/g" | sed -e "s/pull/issues/g" )
+           patch_url=$( echo $new_url |  sed -e 's/[0-9]\+$//' )
+           echo $new_url
+
+           #check if configmap pr-details exists
+           kubectl get configmap -n getting-started pr-details
+           if [[ $? -eq 0 ]]; then
+                value=$(kubectl get configmap -n getting-started pr-details -ojson | jq '.data["pr-url"]')
+                echo "value: $value"
+                link=$(echo $value | sed 's/"//g')
+                echo "link: $link"
+                curl -s -H "Authorization: token ${API_KEY}"  -X POST --data-binary "{\"body\": \" > ${comment} \n\n <img src=https://lh3.googleusercontent.com/-vKEAHNKwqCo/XuEXJqFbkqI/AAAAAAAACUU/rH9I9Z3GuQUfFZVT17Iq_rda8EiekwPzACK8BGAsYHg/s0/2020-06-10.png width=50 height=50> \n Validation is in progress for Pull Request ${link} . Please try later.   \"}" "${new_url}/comments"
+                exit 1
+           fi
+
+           #create configmap pr-details
+           kubectl create configmap -n getting-started pr-details --from-literal=pr-url=$my_url
+
+
+           # Reply back for comfirmation for receiving request
+           comment=$(inputs.params.comment)
+           reply_comment=$(curl -s -H "Authorization: token ${API_KEY}"  -X POST --data-binary "{\"body\": \" > ${comment} \n\n <img src=https://lh3.googleusercontent.com/-vKEAHNKwqCo/XuEXJqFbkqI/AAAAAAAACUU/rH9I9Z3GuQUfFZVT17Iq_rda8EiekwPzACK8BGAsYHg/s0/2020-06-10.png width=50 height=50> \n Request received \"}" "${new_url}/comments")
+
+           reply_comment_id=$(echo "${reply_comment}" | jq '.id')
+           echo  "INFO: reply_comment_id: $reply_comment_id"
+           echo "${reply_comment_id}" > /tekton/home/reply_comment_id.txt
+
+
+           # Reply STAGE 1 running confirmation
+           curl -s -H "Authorization: token ${API_KEY}" -X PATCH --data-binary "{\"body\": \" > ${comment} \n\n  <img src=https://lh3.googleusercontent.com/-vKEAHNKwqCo/XuEXJqFbkqI/AAAAAAAACUU/rH9I9Z3GuQUfFZVT17Iq_rda8EiekwPzACK8BGAsYHg/s0/2020-06-10.png  width=50 height=50> \n Request received \n\n|  STAGE  |  STATUS  | \n |  ---  |  ---  | \n|  STAGE 1: BUILD & PUSH IMAGE  |  :hourglass_flowing_sand:  Running  |\"}" "${patch_url}comments/${reply_comment_id}"
+
+           sleep 10
+
+           # STAGE 1 completes
+           curl -s -H "Authorization: token ${API_KEY}" -X PATCH --data-binary "{\"body\": \" > ${comment} \n\n  <img src=https://lh3.googleusercontent.com/-vKEAHNKwqCo/XuEXJqFbkqI/AAAAAAAACUU/rH9I9Z3GuQUfFZVT17Iq_rda8EiekwPzACK8BGAsYHg/s0/2020-06-10.png  width=50 height=50> \n Request received \n\n|  STAGE  |  STATUS  | \n |  ---  |  ---  | \n|  STAGE 1: BUILD & PUSH IMAGE  |  :heavy_check_mark:  Complete  |\"}" "${patch_url}comments/${reply_comment_id}"
+
+           sleep 10
+
+           # Stage 2 Install Dkube confirmation
+           curl -s -H "Authorization: token ${API_KEY}" -X PATCH --data-binary "{\"body\": \" > ${comment} \n\n  <img src=https://lh3.googleusercontent.com/-vKEAHNKwqCo/XuEXJqFbkqI/AAAAAAAACUU/rH9I9Z3GuQUfFZVT17Iq_rda8EiekwPzACK8BGAsYHg/s0/2020-06-10.png  width=50 height=50> \n Request received \n\n|  STAGE  |  STATUS  | \n |  ---  |  ---  | \n|  STAGE 1: BUILD & PUSH IMAGE  |  :heavy_check_mark:  Complete  |\n|  STAGE 2: INSTALL DKUBE  |  :hourglass_flowing_sand:  Running  | \"}" "${patch_url}comments/${reply_comment_id}"
+           # Install Dkube
+           echo "INFO: $PWD"
+           echo "INFO: $HOME"
+           cp -r /root/.dkube /tekton/home/
+           /opt/dkubeadm/dkubeadm.sh dkube install
+           if [[ $? -eq 0 ]]; then
+                while true
+                do
+                        endpoint=$(kubectl get ep -n dkube | grep dkube-installer-service | awk '{print$2}')
+                        status=$(curl -k -X GET "https://${endpoint}/report" | grep -i last| awk -F ' ' '{ print $NF}') && [[ $status == "PROGRESSING" ]] && echo "$status" && sleep 30;
+                        [[ $status == "COMPLETED" ]] && echo "$status" && break;
+                done
+                # Stage 2 Dkube installation completes
+                curl -s -H "Authorization: token ${API_KEY}" -X PATCH --data-binary "{\"body\": \" > ${comment} \n\n  <img src=https://lh3.googleusercontent.com/-vKEAHNKwqCo/XuEXJqFbkqI/AAAAAAAACUU/rH9I9Z3GuQUfFZVT17Iq_rda8EiekwPzACK8BGAsYHg/s0/2020-06-10.png  width=50 height=50> \n Request received \n\n|  STAGE  |  STATUS  | \n |  ---  |  ---  | \n|  STAGE 1: BUILD & PUSH IMAGE  |  :heavy_check_mark:  Complete  |\n|  STAGE 2: INSTALL DKUBE  |  :heavy_check_mark:  Complete  |\"}" "${patch_url}comments/${reply_comment_id}"
+           else
+                # Stage 2 Dkube installation fails
+                curl -s -H "Authorization: token ${API_KEY}" -X PATCH --data-binary "{\"body\": \" > ${comment} \n\n  <img src=https://lh3.googleusercontent.com/-vKEAHNKwqCo/XuEXJqFbkqI/AAAAAAAACUU/rH9I9Z3GuQUfFZVT17Iq_rda8EiekwPzACK8BGAsYHg/s0/2020-06-10.png  width=50 height=50> \n Request received \n\n|  STAGE  |  STATUS  | \n |  ---  |  ---  | \n|  STAGE 1: BUILD & PUSH IMAGE  |  :heavy_check_mark:  Complete  |\n|  STAGE 2: INSTALL DKUBE  |  :x:  Failed  |\"}" "${patch_url}comments/${reply_comment_id}"
+           fi
+           sleep 60
+      volumeMounts:
+        - name: docker-socket
+          mountPath: /var/run/docker.sock
+
+    - name: run-test-suite
+      env:
+        - name: API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: webhook-secret
+              key: password
+      image: ocdr/atf-test:new
+      securityContext:
+        runAsUser: 0
+        privileged: true
+      command: 
+        - bash
+      args: 
+        - -c
+        - |
+           echo "DEBUG: inside task"
+           my_url=$(resources.inputs.pr-resource.url)
+           echo $my_url
+           new_url=$(echo $my_url | sed -e "s/github.com/api.github.com\/repos/g" | sed -e "s/pull/issues/g" )
+           patch_url=$( echo $new_url |  sed -e 's/[0-9]\+$//' )
+           echo $new_url
+
+           # Reply back for comfirmation for receiving request
+           comment=$(inputs.params.comment)
+
+           # Respond back Running Test suite
+           reply_comment_id=$(cat - < /tekton/home/reply_comment_id.txt)
+           echo "reply_cooment_id: ${reply_comment_id}"
+           curl -s -H "Authorization: token ${API_KEY}" -X PATCH --data-binary "{\"body\": \" > ${comment} \n\n  <img src=https://lh3.googleusercontent.com/-vKEAHNKwqCo/XuEXJqFbkqI/AAAAAAAACUU/rH9I9Z3GuQUfFZVT17Iq_rda8EiekwPzACK8BGAsYHg/s0/2020-06-10.png  width=50 height=50> \n Request received \n\n|  STAGE  |  STATUS  | \n |  ---  |  ---  | \n|  STAGE 1: BUILD & PUSH IMAGE  |  :heavy_check_mark:  Complete  |\n|  STAGE 2: INSTALL DKUBE  |  :heavy_check_mark:  Complete  |\n|  STAGE 3: RUNNING TEST SUITE  |  :hourglass_flowing_sand:  Running  |\"}" "${patch_url}comments/${reply_comment_id}"
+
+           # Results comment
+           reply_comment=$(curl -s -H "Authorization: token ${API_KEY}"  -X POST --data-binary "{\"body\": \" > ${comment} \n\n  <img src=https://lh3.googleusercontent.com/-vKEAHNKwqCo/XuEXJqFbkqI/AAAAAAAACUU/rH9I9Z3GuQUfFZVT17Iq_rda8EiekwPzACK8BGAsYHg/s0/2020-06-10.png  width=50 height=50> \n RESULTS: \n\n |  STATUS  |  TEST CASE  | \n |  ---  |  ---  | \n   \"}"  "${new_url}/comments")
+
+           reply_comment_id=$(echo "${reply_comment}" | jq '.id')
+           echo  "INFO: reply_comment_id: $reply_comment_id"
+           
+           #install packages
+           apt update && apt install curl jq -y
+
+           pr_url=$(resources.inputs.pr-resource.url)
+           pull_request_url=$( echo $pr_url | sed -e "s/github.com/api.github.com\/repos/g" | sed -e "s/pull/pulls/g" )
+           pull_request_json=$( curl -s -H "Authorization: token ${API_KEY}" -H "Accept: application/json"  -X GET "${pull_request_url}" )
+
+           echo $pull_request_json
+           gitrevision=$( echo "${pull_request_json}" | jq '.head.sha' )
+           prbranch=$( echo "${pull_request_json}" | jq '.head.ref' )
+           echo "git revision: ${gitrevision}"
+           echo " pr branch: ${prbranch}"
+           
+           # function check_status
+           check_status() {
+                   echo "INFO: new url after digit removal : ${new_url}"
+                   curr_content=""
+                   while true
+                   do
+                        if [[ $(tail -n 1 /opt/dkube/gpuaas/testing/atf/ui/tests/suites/result.txt) != *"Time Elapsed"* ]]; then
+                                test_result=$( sed ':a;N;$!ba;s/\n/  |\\n/g' < /opt/dkube/gpuaas/testing/atf/ui/tests/suites/result.txt)
+                                echo "INFO: test result: ${test_result}"
+                                test_result=$( echo "${test_result}" | sed -e "s/ok/|  :heavy_check_mark:  |  /g" | sed -e "s/[F] /|  :x:  |  /g" | sed -e "s/[E] /|  :x:  |  /g" )
+                                echo "INFO: test result: ${test_result}"
+                                echo "INFO: current content : ${curr_content}"
+                                [[ ! -z "${test_result}" ]] && [[ "${test_result}" != "${curr_content}" ]] && curl -s -H "Authorization: token ${API_KEY}" -X PATCH --data-binary "{\"body\": \" > ${comment} \n\n  <img src=https://lh3.googleusercontent.com/-vKEAHNKwqCo/XuEXJqFbkqI/AAAAAAAACUU/rH9I9Z3GuQUfFZVT17Iq_rda8EiekwPzACK8BGAsYHg/s0/2020-06-10.png  width=50 height=50> \n RESULTS: \n\n |  STATUS  |  TEST CASE  | \n |  ---  |  ---  | \n  ${test_result} \"}" "${patch_url}comments/${reply_comment_id}"
+                                curr_content=${test_result}
+                                echo "DEBUG: test result : ${test_result}"
+                                echo "DEBUG: current content : ${curr_content}"
+                                sleep 300s;
+                        else
+                                echo "========MATCHED========"
+                                test_result=$( sed ':a;N;$!ba;s/\n/  |\\n/g' <  /opt/dkube/gpuaas/testing/atf/ui/tests/suites/result.txt)
+                                echo "INFO: test result: ${test_result}"
+                                test_result=$( echo "${test_result}" | sed -e "s/ok/|  :heavy_check_mark:  |  /g" | sed -e "s/[F] /|  :x:  |  /g" | sed -e "s/[E] /|  :x:  |  /g" )
+                                echo "INFO: test result: ${test_result}"
+                                [[ ! -z "${test_result}" ]] && curl -s -H "Authorization: token ${API_KEY}" -X PATCH --data-binary "{\"body\": \" > ${comment} \n\n  <img src=https://lh3.googleusercontent.com/-vKEAHNKwqCo/XuEXJqFbkqI/AAAAAAAACUU/rH9I9Z3GuQUfFZVT17Iq_rda8EiekwPzACK8BGAsYHg/s0/2020-06-10.png  width=50 height=50> \n RESULTS: \n\n |  STATUS  |  TEST CASE  | \n |  ---  |  ---  | \n  ${test_result}  \n\n @mak-454 Test suite completes. \"}" "${patch_url}comments/${reply_comment_id}"
+                                break;
+                        fi
+                   done
+           }
+
+           # Execute test
+           chmod +x /opt/dkube/run.sh 
+           cp /opt/dkube/run.sh /usr/local/bin/run.sh
+           /usr/local/bin/run.sh &
+           sleep 120
+           check_status 
+           rm /usr/local/bin/run.sh
+           # Respond back complete Test suite
+           reply_comment_id=$(cat - < /tekton/home/reply_comment_id.txt)
+           echo "reply_cooment_id: ${reply_comment_id}"
+           curl -s -H "Authorization: token ${API_KEY}" -X PATCH --data-binary "{\"body\": \" > ${comment} \n\n  <img src=https://lh3.googleusercontent.com/-vKEAHNKwqCo/XuEXJqFbkqI/AAAAAAAACUU/rH9I9Z3GuQUfFZVT17Iq_rda8EiekwPzACK8BGAsYHg/s0/2020-06-10.png  width=50 height=50> \n Request received \n\n|  STAGE  |  STATUS  | \n |  ---  |  ---  | \n|  STAGE 1: BUILD & PUSH IMAGE  |  :heavy_check_mark:  Complete  |\n|  STAGE 2: INSTALL DKUBE  |  :heavy_check_mark:  Complete  |\n|  STAGE 3: RUNNING TEST SUITE  |  :heavy_check_mark:  Complete  |\"}" "${patch_url}comments/${reply_comment_id}"
+           directory_name=$(date +"Automation-log-%d-%m-%Y-%a-%H-%M-%S")
+           mkdir -p "/tmp/${directory_name}"
+           cp -R /opt/dkube/gpuaas/testing/atf/ui/tests/suites/ "/tmp/${directory_name}" && echo "Logs copied to path /tmp/${directory_name}"
+
+      volumeMounts:
+        - name: docker-socket
+          mountPath: /var/run/docker.sock
+        - name: driver
+          mountPath: /mnt
+        - name: log-path
+          mountPath: /tmp
+
+    - name: uninstall-dkube
+      env:
+        - name: API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: webhook-secret
+              key: password
+      image: ocdr/atf-test:new
+      securityContext:
+        runAsUser: 0
+        privileged: true
+      command: 
+        - bash
+      args: 
+        - -c
+        - |
+           echo "DEBUG: inside task"
+           my_url=$(resources.inputs.pr-resource.url)
+           echo $my_url
+           new_url=$(echo $my_url | sed -e "s/github.com/api.github.com\/repos/g" | sed -e "s/pull/issues/g" )
+           patch_url=$( echo $new_url |  sed -e 's/[0-9]\+$//' )
+           echo $new_url
+
+           # Uninstall Dkube
+           echo "INFO: $PWD"
+           echo "INFO: $HOME"
+           cp -r /root/.dkube /tekton/home/
+           reply_comment_id=$(cat - < /tekton/home/reply_comment_id.txt)
+           echo "reply_cooment_id: ${reply_comment_id}"
+           # STAGE 4 Running Dkube uninstall
+           curl -s -H "Authorization: token ${API_KEY}" -X PATCH --data-binary "{\"body\": \" > ${comment} \n\n  <img src=https://lh3.googleusercontent.com/-vKEAHNKwqCo/XuEXJqFbkqI/AAAAAAAACUU/rH9I9Z3GuQUfFZVT17Iq_rda8EiekwPzACK8BGAsYHg/s0/2020-06-10.png  width=50 height=50> \n Request received \n\n|  STAGE  |  STATUS  | \n |  ---  |  ---  | \n|  STAGE 1: BUILD & PUSH IMAGE  |  :heavy_check_mark:  Complete  |\n|  STAGE 2: INSTALL DKUBE  |  :heavy_check_mark:  Complete  |\n|  STAGE 3: RUNNING TEST SUITE  |  :heavy_check_mark:  Complete  |\n|  STAGE 4: UNINSTALL DKUBE  |  :hourglass_flowing_sand:  Running  |\"}" "${patch_url}comments/${reply_comment_id}"
+           /opt/dkubeadm/dkubeadm.sh dkube uninstall
+           if [[ $? -eq 0 ]]; then
+                curl -s -H "Authorization: token ${API_KEY}" -X PATCH --data-binary "{\"body\": \" > ${comment} \n\n  <img src=https://lh3.googleusercontent.com/-vKEAHNKwqCo/XuEXJqFbkqI/AAAAAAAACUU/rH9I9Z3GuQUfFZVT17Iq_rda8EiekwPzACK8BGAsYHg/s0/2020-06-10.png  width=50 height=50> \n Request received \n\n|  STAGE  |  STATUS  | \n |  ---  |  ---  | \n|  STAGE 1: BUILD & PUSH IMAGE  |  :heavy_check_mark:  Complete  |\n|  STAGE 2: INSTALL DKUBE  |  :heavy_check_mark:  Complete  |\n|  STAGE 3: RUNNING TEST SUITE  |  :heavy_check_mark:  Complete  |\n|  STAGE 4: UNINSTALL DKUBE  |  :heavy_check_mark:  Complete  |\"}" "${patch_url}comments/${reply_comment_id}"
+
+           else
+                # Stage 3 Dkube installation fails
+                echo "Uninstall failed"
+                curl -s -H "Authorization: token ${API_KEY}" -X PATCH --data-binary "{\"body\": \" > ${comment} \n\n  <img src=https://lh3.googleusercontent.com/-vKEAHNKwqCo/XuEXJqFbkqI/AAAAAAAACUU/rH9I9Z3GuQUfFZVT17Iq_rda8EiekwPzACK8BGAsYHg/s0/2020-06-10.png  width=50 height=50> \n Request received \n\n|  STAGE  |  STATUS  | \n |  ---  |  ---  | \n|  STAGE 1: BUILD & PUSH IMAGE  |  :heavy_check_mark:  Complete  |\n|  STAGE 2: INSTALL DKUBE  |  :heavy_check_mark:  Complete  |\n|  STAGE 3: RUNNING TEST SUITE  |  :heavy_check_mark:  Complete  |\n|  STAGE 4: UNINSTALL DKUBE  |  :x:  Failed  |\"}" "${patch_url}comments/${reply_comment_id}"
+           fi
+
+           # delete configmap pr-details
+           kubectl delete configmap -n getting-started pr-details
+
+      volumeMounts:
+        - name: docker-socket
+          mountPath: /var/run/docker.sock
+
+  volumes:
+    - name: docker-socket
+      hostPath:
+        path: /var/run/docker.sock
+        type: Socket
+    - name: driver
+      hostPath:
+        path: /usr/local/bin/
+        type: Directory
+    - name: log-path
+      hostPath:
+        path: /tmp
+        type: Directory
+---
+

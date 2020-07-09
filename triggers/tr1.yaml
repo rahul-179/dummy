@@ -1,0 +1,106 @@
+apiVersion: triggers.tekton.dev/v1alpha1
+kind: TriggerTemplate
+metadata:
+  name: getting-started-triggertemplate
+  namespace: getting-started
+spec:
+  params:
+    - name: gitrevision
+      description: The git revision
+      default: "master"
+    - name: gitrepositoryurl
+      description: The git repository url
+    - name: namespace
+      description: The namespace to create the resources
+    - name: pullurl
+      description: Comment value passed in pull request
+      default: "nocomment"
+    - name: comment
+      description: The content type
+      default: "default"
+    - name: contenttype
+      description: The content type
+      default: "default"
+  resourcetemplates:
+    - apiVersion: tekton.dev/v1beta1
+      kind: PipelineRun
+      metadata:
+        name: getting-started-pipeline-run-$(uid)
+        namespace: $(params.namespace)
+      spec:
+        serviceAccountName: tekton-triggers-admin
+        pipelineRef:
+          name: getting-started-pipeline
+        timeout: 10h0m0s
+        params:
+          - name: contenttype
+            value: $(params.contenttype)
+          - name: comment
+            value: $(params.comment)
+        resources:
+          - name: source-repo
+            resourceSpec:
+              type: git
+              params:
+              - name: url
+                value: $(params.gitrepositoryurl)
+          - name: pr-resource
+            resourceSpec:
+              type: pullRequest
+              params:
+              - name: url
+                value: $(params.pullurl)
+              secrets:
+                - fieldName: authToken
+                  secretName: webhook-secret
+                  secretKey: password
+          - name: image-source
+            resourceSpec:
+              type: image
+              params:
+                - name: url
+                  value: docker.io/ocdr/atf-test:latest  # docker-repo-location.com/repo:getting-started
+          - name: event-to-sink
+            resourceSpec:
+              type: cloudEvent
+              params:
+                - name: targetURI
+                  value: http://event-display.getting-started.svc.cluster.local
+---
+apiVersion: triggers.tekton.dev/v1alpha1
+kind: TriggerBinding
+metadata:
+  name: getting-started-pipelinebinding
+  namespace: getting-started
+spec:
+  params:
+    - name: gitrevision
+      value: "master"
+    - name: namespace
+      value: getting-started
+    - name: gitrepositoryurl
+      value: $(body.repository.clone_url)
+    - name: pullurl
+      value: $(body.issue.html_url)
+    - name: comment
+      value: $(body.comment.body)
+---
+apiVersion: triggers.tekton.dev/v1alpha1
+kind: EventListener
+metadata:
+  name: getting-started-listener
+  namespace: getting-started
+spec:
+  serviceAccountName: tekton-triggers-admin
+  triggers:
+    - name: trigger1
+      interceptors:
+        - cel:
+            filter: >- 
+              (header.match('X-GitHub-Event', 'issue_comment') && body.comment.body == '/dkube-bot:test')
+      bindings:
+      - name: getting-started-pipelinebinding
+      template:
+        name: getting-started-triggertemplate
+  serviceType: NodePort
+
