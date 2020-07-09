@@ -1,6 +1,6 @@
 #! /bin/bash
-
-kubectl create clusterrolebinding cluster-admin-binding --clusterrole=cluster-admin --user=$USER
+user=$(whoami)
+kubectl create clusterrolebinding cluster-admin-binding --clusterrole=cluster-admin --user=$user
 #applying tekton pipelines
 kubectl apply --filename https://storage.googleapis.com/tekton-releases/pipeline/latest/release.yaml
 
@@ -20,7 +20,7 @@ kubectl apply -f /opt/dkube/secrets.yaml
 #dashboard
 kubectl apply --filename https://storage.googleapis.com/tekton-releases/dashboard/latest/tekton-dashboard-release.yaml
 sleep 5
-kubectl get svc tekton-dashboard --namespace tekton-pipelines > dashboard.yaml && sed -i "s/ClusterIP/NodePort/" dashboard.yaml && kubectl replace -f dashboard.yaml
+kubectl get svc tekton-dashboard --namespace tekton-pipelines -oyaml > dashboard.yaml && sed -i "s/ClusterIP/NodePort/" dashboard.yaml && kubectl replace -f dashboard.yaml
 
 
 #TODO: display dashboard port
